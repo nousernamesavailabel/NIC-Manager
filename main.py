@@ -2,10 +2,12 @@ from elevate import elevate
 import threading
 import sys
 import subprocess
+import math
 from PyQt5.QtCore import pyqtSlot, QMetaObject, Qt, Q_ARG  # Add this at the top of your file
 from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QListWidget, QTextEdit, QLineEdit, QPushButton, \
     QFormLayout, QMessageBox, QRadioButton, QButtonGroup, QHBoxLayout, QTabWidget, QTableWidget, QTableWidgetItem
 from PyQt5.QtWidgets import QProgressBar
+from PyQt5.QtWidgets import QApplication
 
 # Automatically request elevated privileges
 #elevate()
@@ -608,18 +610,23 @@ class NICViewer(QWidget):
 
             current_mtu = max_mtu
 
-            # Total steps for progress calculation
-            total_steps = max_mtu - min_mtu
+            # Total steps for binary search: log2(max_mtu - min_mtu)
+            total_steps = math.ceil(math.log2(max_mtu - min_mtu))
             current_step = 0
+
+            # Force GUI update for the initial state
+            QApplication.processEvents()
 
             if send_ping_with_mtu(current_mtu, remote_host):
                 self.update_debug_output(f"[DEBUG] Ping successful with max MTU: {current_mtu}")
                 self.update_progress_bar(100)
+                QApplication.processEvents()  # Ensure the update is processed
                 return
 
             if not send_ping_with_mtu(min_mtu, remote_host):
                 self.update_debug_output(f"[DEBUG] Ping failed even with min MTU: {min_mtu}")
                 self.update_progress_bar(100)
+                QApplication.processEvents()  # Ensure the update is processed
                 return
 
             while max_mtu - min_mtu > 1 and self.mtu_test_running:
@@ -632,11 +639,14 @@ class NICViewer(QWidget):
                     max_mtu = current_mtu
 
                 current_step += 1
-                self.update_progress_bar((current_step / total_steps) * 100)
+                progress_value = (current_step / total_steps) * 100
+                self.update_progress_bar(progress_value)
+                QApplication.processEvents()  # Process the events to update GUI elements
 
             if self.mtu_test_running:
                 self.update_debug_output(f"[DEBUG] Optimal MTU found: {min_mtu}")
                 self.update_progress_bar(100)
+                QApplication.processEvents()  # Ensure the update is processed
         except Exception as e:
             self.update_debug_output(f"[ERROR] Failed to run MTU test: {str(e)}")
         finally:
@@ -655,10 +665,12 @@ class NICViewer(QWidget):
     def update_progress_bar(self, value):
         """Update the progress bar with the current value."""
         QMetaObject.invokeMethod(self.mtu_progress_bar, "setValue", Qt.QueuedConnection, Q_ARG(int, int(value)))
+        QApplication.processEvents()  # Ensure the progress bar updates immediately
 
     def update_debug_output(self, message):
         """Update the debug output text area with the latest message."""
         QMetaObject.invokeMethod(self.debug_output, "append", Qt.QueuedConnection, Q_ARG(str, message))
+        QApplication.processEvents()  # Ensure the debug output updates immediately
 
     def show_message_box(self, title, message):
         """Helper function to show message box (called from the thread)."""
