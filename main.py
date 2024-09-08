@@ -217,24 +217,34 @@ def get_routing_table():
         QMessageBox.critical(None, "Error", f"Failed to retrieve routing table: {str(e)}")
         return []
 
-def send_ping_with_mtu(mtu_size, remote_host):
+def send_ping_with_mtu(mtu_size, remote_host, timeout):
     """Send a ping with the specified MTU and the DF (Don't Fragment) bit set."""
     try:
-        # The command sends a ping with the specified packet size and the DF bit set
-        command = f'ping -f -l {mtu_size} {remote_host}'  # You can change 8.8.8.8 to any destination
+        # The command sends a ping with the specified packet size, DF bit, and timeout
+        command = f'ping -f -l {mtu_size} -w {timeout} {remote_host}'
         print(f"[DEBUG] Running command: {command}")
         result = subprocess.run(command, capture_output=True, text=True, shell=True)
 
-        if "Packet needs to be fragmented" in result.stdout:
+        output = result.stdout
+        print(f"[DEBUG] Ping result output:\n{output}")
+
+        # Check for the fragmentation message
+        if "Packet needs to be fragmented" in output:
             print(f"[DEBUG] Ping failed: MTU {mtu_size} is too large, needs to fragment.")
-            return False  # Ping failed due to fragmentation
-        else:
-            print(f"[DEBUG] Ping successful with MTU {mtu_size}.")
-            return True  # Ping succeeded
+            return "fragmentation"
+
+        # Check for "Request timed out" message
+        if "Request timed out" in output:
+            print(f"[DEBUG] Ping failed: Request timed out.")
+            return "timeout"
+
+        # If neither condition is met, assume the ping was successful
+        print(f"[DEBUG] Ping successful with MTU {mtu_size}.")
+        return "success"
 
     except Exception as e:
         print(f"[ERROR] Failed to send ping: {e}")
-        return False
+        return "error"
 
 
 
@@ -517,11 +527,13 @@ class NICViewer(QWidget):
         self.max_mtu_input = QLineEdit(self)
         self.min_mtu_input = QLineEdit(self)
         self.remote_host_input = QLineEdit(self)
+        self.timeout_input = QLineEdit(self)
 
         mtu_form_layout = QFormLayout()
         mtu_form_layout.addRow("Maximum MTU:", self.max_mtu_input)
         mtu_form_layout.addRow("Minimum MTU:", self.min_mtu_input)
         mtu_form_layout.addRow("Remote Host:", self.remote_host_input)
+        mtu_form_layout.addRow("Timeout (ms):", self.timeout_input)
 
         mtu_layout.addLayout(mtu_form_layout)
 
@@ -604,6 +616,12 @@ class NICViewer(QWidget):
             max_mtu = int(self.max_mtu_input.text())
             min_mtu = int(self.min_mtu_input.text())
             remote_host = self.remote_host_input.text()
+            timeout_input = self.timeout_input.text()
+
+            if not timeout_input:
+                timeout = 2000
+            else:
+                timeout = int(self.timeout_input.text())
 
             if max_mtu <= min_mtu:
                 raise ValueError("Maximum MTU should be greater than Minimum MTU.")
@@ -614,35 +632,50 @@ class NICViewer(QWidget):
             total_steps = math.ceil(math.log2(max_mtu - min_mtu))
             current_step = 0
 
-            # Force GUI update for the initial state
-            QApplication.processEvents()
+            # First ping with max_mtu
+            self.test_ping_mtu(current_mtu, remote_host, timeout)
+            ping_result = send_ping_with_mtu(current_mtu, remote_host, timeout)
 
-            if send_ping_with_mtu(current_mtu, remote_host):
+            if ping_result == "success":
                 self.update_debug_output(f"[DEBUG] Ping successful with max MTU: {current_mtu}")
                 self.update_progress_bar(100)
                 QApplication.processEvents()  # Ensure the update is processed
                 return
-
-            if not send_ping_with_mtu(min_mtu, remote_host):
-                self.update_debug_output(f"[DEBUG] Ping failed even with min MTU: {min_mtu}")
+            elif ping_result == "fragmentation":
+                self.update_debug_output(f"[DEBUG] Ping failed: MTU {current_mtu} is too large, needs to fragment.")
+            elif ping_result == "timeout":
+                self.update_debug_output(f"[DEBUG] Ping failed: Request timed out.")
                 self.update_progress_bar(100)
-                QApplication.processEvents()  # Ensure the update is processed
+                QApplication.processEvents()
+                return
+            else:
+                self.update_debug_output(f"[ERROR] Failed to run ping test with MTU {current_mtu}.")
                 return
 
+            # Continue binary search for optimal MTU
             while max_mtu - min_mtu > 1 and self.mtu_test_running:
                 current_mtu = (max_mtu + min_mtu) // 2
-                if send_ping_with_mtu(current_mtu, remote_host):
+                self.test_ping_mtu(current_mtu, remote_host, timeout)
+                ping_result = send_ping_with_mtu(current_mtu, remote_host, timeout)
+
+                if ping_result == "success":
                     self.update_debug_output(f"[DEBUG] Ping successful with MTU {current_mtu}.")
                     min_mtu = current_mtu
-                else:
-                    self.update_debug_output(f"[DEBUG] Ping failed with MTU {current_mtu}.")
+                elif ping_result == "fragmentation":
+                    self.update_debug_output(f"[DEBUG] Ping failed with MTU {current_mtu}: needs to fragment.")
                     max_mtu = current_mtu
+                elif ping_result == "timeout":
+                    self.update_debug_output(f"[DEBUG] Ping failed with MTU {current_mtu}: Request timed out.")
+                    max_mtu = current_mtu
+                else:
+                    self.update_debug_output(f"[ERROR] Ping test failed for MTU {current_mtu}.")
 
                 current_step += 1
                 progress_value = (current_step / total_steps) * 100
                 self.update_progress_bar(progress_value)
                 QApplication.processEvents()  # Process the events to update GUI elements
 
+            # Final result
             if self.mtu_test_running:
                 self.update_debug_output(f"[DEBUG] Optimal MTU found: {min_mtu}")
                 self.update_progress_bar(100)
@@ -662,10 +695,14 @@ class NICViewer(QWidget):
         else:
             QMessageBox.warning(self, "Warning", "No MTU test is running.")
 
+    def test_ping_mtu(self, mtu, remote_host, timeout):
+        """Test ping with a specific MTU size and update the GUI immediately."""
+        self.update_debug_output(f"[DEBUG] Running command: ping -f -l {mtu} {remote_host} -w {timeout}")
+        QApplication.processEvents()  # Ensure the command is shown immediately
+
     def update_progress_bar(self, value):
         """Update the progress bar with the current value."""
         QMetaObject.invokeMethod(self.mtu_progress_bar, "setValue", Qt.QueuedConnection, Q_ARG(int, int(value)))
-        QApplication.processEvents()  # Ensure the progress bar updates immediately
 
     def update_debug_output(self, message):
         """Update the debug output text area with the latest message."""
