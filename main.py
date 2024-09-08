@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import QProgressBar
 from PyQt5.QtWidgets import QApplication
 
 # Automatically request elevated privileges
-#elevate()
+elevate()
 
 def get_nic_names():
     """Use netsh to get network interface names."""
