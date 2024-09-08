@@ -1,12 +1,14 @@
 from elevate import elevate
+import threading
 import sys
 import subprocess
+from PyQt5.QtCore import pyqtSlot, QMetaObject, Qt, Q_ARG  # Add this at the top of your file
 from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QListWidget, QTextEdit, QLineEdit, QPushButton, \
     QFormLayout, QMessageBox, QRadioButton, QButtonGroup, QHBoxLayout, QTabWidget, QTableWidget, QTableWidgetItem
-
+from PyQt5.QtWidgets import QProgressBar
 
 # Automatically request elevated privileges
-elevate()
+#elevate()
 
 def get_nic_names():
     """Use netsh to get network interface names."""
@@ -213,6 +215,26 @@ def get_routing_table():
         QMessageBox.critical(None, "Error", f"Failed to retrieve routing table: {str(e)}")
         return []
 
+def send_ping_with_mtu(mtu_size, remote_host):
+    """Send a ping with the specified MTU and the DF (Don't Fragment) bit set."""
+    try:
+        # The command sends a ping with the specified packet size and the DF bit set
+        command = f'ping -f -l {mtu_size} {remote_host}'  # You can change 8.8.8.8 to any destination
+        print(f"[DEBUG] Running command: {command}")
+        result = subprocess.run(command, capture_output=True, text=True, shell=True)
+
+        if "Packet needs to be fragmented" in result.stdout:
+            print(f"[DEBUG] Ping failed: MTU {mtu_size} is too large, needs to fragment.")
+            return False  # Ping failed due to fragmentation
+        else:
+            print(f"[DEBUG] Ping successful with MTU {mtu_size}.")
+            return True  # Ping succeeded
+
+    except Exception as e:
+        print(f"[ERROR] Failed to send ping: {e}")
+        return False
+
+
 
 class NICViewer(QWidget):
     def __init__(self):
@@ -239,6 +261,11 @@ class NICViewer(QWidget):
         self.routing_tab = QWidget()
         self.init_routing_tab()
         self.tabs.addTab(self.routing_tab, "Routing Table")
+
+        # Tab 3: MTU
+        self.mtu_tab = QWidget()
+        self.init_mtu_tab()
+        self.tabs.addTab(self.mtu_tab, "MTU")
 
         self.setLayout(layout)
 
@@ -466,6 +493,187 @@ class NICViewer(QWidget):
         except Exception as e:
             print(f"[ERROR] Failed to delete route: {e}")
             QMessageBox.critical(self, "Error", f"Failed to delete route: {str(e)}")
+
+    def init_mtu_tab(self):
+        """Initialize the MTU tab components."""
+        mtu_layout = QVBoxLayout()
+
+        label = QLabel('Network Interface Cards (NICs) and their MTU:')
+        mtu_layout.addWidget(label)
+
+        # NIC List for MTU tab
+        self.mtu_nic_list = QListWidget()
+        self.mtu_nic_list.clicked.connect(self.show_mtu_details)  # Link to show MTU details function
+        mtu_layout.addWidget(self.mtu_nic_list)
+
+        # Create a text area to display the NIC IP, Gateway, and MTU
+        self.mtu_details = QTextEdit()
+        self.mtu_details.setReadOnly(True)
+        mtu_layout.addWidget(self.mtu_details)
+
+        # Entry for Maximum MTU
+        self.max_mtu_input = QLineEdit(self)
+        self.min_mtu_input = QLineEdit(self)
+        self.remote_host_input = QLineEdit(self)
+
+        mtu_form_layout = QFormLayout()
+        mtu_form_layout.addRow("Maximum MTU:", self.max_mtu_input)
+        mtu_form_layout.addRow("Minimum MTU:", self.min_mtu_input)
+        mtu_form_layout.addRow("Remote Host:", self.remote_host_input)
+
+        mtu_layout.addLayout(mtu_form_layout)
+
+        # Run button to start the binary search for MTU
+        self.run_mtu_button = QPushButton("Run MTU Test", self)
+        self.run_mtu_button.clicked.connect(self.start_mtu_test_thread)
+        mtu_layout.addWidget(self.run_mtu_button)
+
+        # Stop button to stop the binary search for MTU
+        self.stop_mtu_button = QPushButton("Stop MTU Test", self)
+        self.stop_mtu_button.clicked.connect(self.stop_mtu_test)
+        mtu_layout.addWidget(self.stop_mtu_button)
+
+        # Progress bar for MTU test
+        self.mtu_progress_bar = QProgressBar(self)
+        mtu_layout.addWidget(self.mtu_progress_bar)
+
+        # Debug output text area for showing ping results
+        self.debug_output = QTextEdit(self)
+        self.debug_output.setReadOnly(True)
+        mtu_layout.addWidget(self.debug_output)
+
+        self.mtu_tab.setLayout(mtu_layout)
+
+        # Populate NIC names in the MTU tab
+        self.populate_mtu_nic_list()
+
+        # Variable to track if the MTU test is running
+        self.mtu_test_running = False
+        self.mtu_thread = None  # To track the thread instance
+
+    def populate_mtu_nic_list(self):
+        """Populate NIC names in the MTU tab."""
+        print("[DEBUG] Populating NIC list for MTU tab")
+        self.mtu_nic_list.clear()  # Clear the list before repopulating
+        nic_names = get_nic_names()
+        for nic in nic_names:
+            print(f"[DEBUG] Adding NIC to MTU tab list: {nic}")  # DEBUG
+            self.mtu_nic_list.addItem(nic)
+
+    def show_mtu_details(self):
+        """Display the NIC IP, Gateway, and MTU details when an interface is clicked in the MTU tab."""
+        try:
+            selected_nic = self.mtu_nic_list.currentItem().text()  # Get selected NIC
+            print(f"[DEBUG] Fetching details for {selected_nic} in MTU tab")  # DEBUG
+
+            # Call get_nic_details to retrieve NIC details
+            nic_details = get_nic_details(selected_nic)
+
+            if not nic_details:
+                raise ValueError(f"No details were retrieved for interface: {selected_nic}")
+
+            # Format the details to show only IP Address, Gateway, and MTU
+            details_text = f"Details for {selected_nic}:\n"
+            details_text += f"IP Address: {nic_details.get('IP Address', 'Unknown')}\n"
+            details_text += f"Gateway: {nic_details.get('Default Gateway', 'No gateway')}\n"
+            details_text += f"MTU: {nic_details.get('MTU', 'Unknown')}\n"
+
+            print(f"[DEBUG] Displaying NIC details in MTU tab:\n{details_text}")  # DEBUG
+            self.mtu_details.setText(details_text)
+
+        except Exception as e:
+            print(f"[ERROR] Failed to show NIC details in MTU tab: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to display NIC details in MTU tab: {str(e)}")
+
+    def start_mtu_test_thread(self):
+        """Start the MTU test in a separate thread."""
+        if not self.mtu_test_running:
+            self.mtu_test_running = True
+            self.mtu_progress_bar.setValue(0)  # Reset progress bar at the start
+            self.debug_output.clear()  # Clear previous debug output
+            self.mtu_thread = threading.Thread(target=self.run_mtu_test)
+            self.mtu_thread.start()
+        else:
+            QMessageBox.warning(self, "Warning", "MTU test is already running.")
+
+    def run_mtu_test(self):
+        """Run MTU test starting with max MTU, down to min MTU, using binary search to find the optimal value."""
+        try:
+            max_mtu = int(self.max_mtu_input.text())
+            min_mtu = int(self.min_mtu_input.text())
+            remote_host = self.remote_host_input.text()
+
+            if max_mtu <= min_mtu:
+                raise ValueError("Maximum MTU should be greater than Minimum MTU.")
+
+            current_mtu = max_mtu
+
+            # Total steps for progress calculation
+            total_steps = max_mtu - min_mtu
+            current_step = 0
+
+            if send_ping_with_mtu(current_mtu, remote_host):
+                self.update_debug_output(f"[DEBUG] Ping successful with max MTU: {current_mtu}")
+                self.update_progress_bar(100)
+                return
+
+            if not send_ping_with_mtu(min_mtu, remote_host):
+                self.update_debug_output(f"[DEBUG] Ping failed even with min MTU: {min_mtu}")
+                self.update_progress_bar(100)
+                return
+
+            while max_mtu - min_mtu > 1 and self.mtu_test_running:
+                current_mtu = (max_mtu + min_mtu) // 2
+                if send_ping_with_mtu(current_mtu, remote_host):
+                    self.update_debug_output(f"[DEBUG] Ping successful with MTU {current_mtu}.")
+                    min_mtu = current_mtu
+                else:
+                    self.update_debug_output(f"[DEBUG] Ping failed with MTU {current_mtu}.")
+                    max_mtu = current_mtu
+
+                current_step += 1
+                self.update_progress_bar((current_step / total_steps) * 100)
+
+            if self.mtu_test_running:
+                self.update_debug_output(f"[DEBUG] Optimal MTU found: {min_mtu}")
+                self.update_progress_bar(100)
+        except Exception as e:
+            self.update_debug_output(f"[ERROR] Failed to run MTU test: {str(e)}")
+        finally:
+            self.mtu_test_running = False
+
+    def stop_mtu_test(self):
+        """Stop the MTU test by setting the flag to False."""
+        if self.mtu_test_running:
+            self.mtu_test_running = False
+            if self.mtu_thread:
+                self.mtu_thread.join()  # Wait for the thread to finish
+            QMessageBox.information(self, "Stopped", "MTU test stopped.")
+        else:
+            QMessageBox.warning(self, "Warning", "No MTU test is running.")
+
+    def update_progress_bar(self, value):
+        """Update the progress bar with the current value."""
+        QMetaObject.invokeMethod(self.mtu_progress_bar, "setValue", Qt.QueuedConnection, Q_ARG(int, int(value)))
+
+    def update_debug_output(self, message):
+        """Update the debug output text area with the latest message."""
+        QMetaObject.invokeMethod(self.debug_output, "append", Qt.QueuedConnection, Q_ARG(str, message))
+
+    def show_message_box(self, title, message):
+        """Helper function to show message box (called from the thread)."""
+        # Use QMetaObject to ensure the message box runs in the main thread.
+        QMetaObject.invokeMethod(
+            self, "showMessage", Qt.QueuedConnection,
+            Q_ARG(str, title),
+            Q_ARG(str, message)
+        )
+
+    @pyqtSlot(str, str)
+
+    def showMessage(self, title, message):
+        """Show message in a QMessageBox, thread-safe."""
+        QMessageBox.information(self, title, message)
 
     def on_radio_toggle(self):
         """Enable or disable fields based on selected radio button."""
