@@ -337,6 +337,7 @@ class NICViewer(QWidget):
         label = QLabel('Windows Routing Table:')
         routing_layout.addWidget(label)
 
+
         # Create a table widget to display the routing table
         self.routing_table_widget = QTableWidget()
         self.routing_table_widget.setColumnCount(5)
@@ -361,14 +362,17 @@ class NICViewer(QWidget):
         # Add and Delete buttons
         self.add_button = QPushButton("Add Route", self)
         self.delete_button = QPushButton("Delete Route", self)
+        self.route_refresh_button = QPushButton("Refresh", self)
 
         self.add_button.clicked.connect(self.add_route)
         self.delete_button.clicked.connect(self.delete_route)
+        self.route_refresh_button.clicked.connect(self.populate_routing_table)
 
         # Horizontal layout for buttons
         button_layout = QHBoxLayout()
         button_layout.addWidget(self.add_button)
         button_layout.addWidget(self.delete_button)
+        button_layout.addWidget(self.route_refresh_button)
         routing_layout.addLayout(button_layout)
 
         self.routing_tab.setLayout(routing_layout)
@@ -441,11 +445,12 @@ class NICViewer(QWidget):
         try:
             destination = self.destination_input.text()
             netmask = self.netmask_input.text()
+            routegateway = self.route_gateway_input.text()  # Reference the renamed gateway input
 
             if not destination or not netmask:
                 raise ValueError("Network Destination and Netmask are required for deletion.")
 
-            command = f'route delete {destination} mask {netmask}'
+            command = f'route delete {destination} mask {netmask} {routegateway}'
             print(f"[DEBUG] Running command: {command}")  # DEBUG
             result = subprocess.run(command, capture_output=True, text=True, shell=True)
 
