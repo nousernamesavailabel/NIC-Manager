@@ -246,6 +246,11 @@ class NICViewer(QWidget):
         """Initialize the NIC tab components."""
         nic_layout = QVBoxLayout()
 
+        # Add Refresh Button
+        self.refresh_button = QPushButton("Refresh NIC Info", self)
+        self.refresh_button.clicked.connect(self.refresh_nic_info)  # Connect button to refresh function
+        nic_layout.addWidget(self.refresh_button)  # Add button to the layout
+
         label = QLabel('Network Interface Cards (NICs) on this machine:')
         nic_layout.addWidget(label)
 
@@ -306,13 +311,24 @@ class NICViewer(QWidget):
         self.nic_tab.setLayout(nic_layout)
 
         # Populate NIC names
+        self.populate_nic_list()  # Moved into a separate function for refresh functionality
+
+        self.current_nic = None
+
+    def populate_nic_list(self):
+        """Populate NIC names in the list."""
         print("[DEBUG] Retrieving NIC names")  # DEBUG
+        self.nic_list.clear()  # Clear the NIC list before repopulating
         nic_names = get_nic_names()
         for nic in nic_names:
             print(f"[DEBUG] Adding NIC to list: {nic}")  # DEBUG
             self.nic_list.addItem(nic)
 
-        self.current_nic = None
+    def refresh_nic_info(self):
+        """Refresh the NIC info by clearing and repopulating the NIC list and details."""
+        print("[DEBUG] Refreshing NIC info")  # DEBUG
+        self.nic_details.clear()  # Clear the NIC details display
+        self.populate_nic_list()  # Repopulate NIC list
 
     def init_routing_tab(self):
         """Initialize the routing table tab components."""
@@ -331,14 +347,14 @@ class NICViewer(QWidget):
         # Create entry boxes for adding/deleting routes
         self.destination_input = QLineEdit(self)
         self.netmask_input = QLineEdit(self)
-        self.gateway_input = QLineEdit(self)
+        self.route_gateway_input = QLineEdit(self)  # Rename gateway input for the routing table tab
         self.metric_input = QLineEdit(self)
 
         # Form layout for the route inputs
         route_form_layout = QFormLayout()
         route_form_layout.addRow("Network Destination:", self.destination_input)
         route_form_layout.addRow("Netmask:", self.netmask_input)
-        route_form_layout.addRow("Gateway:", self.gateway_input)
+        route_form_layout.addRow("Gateway:", self.route_gateway_input)  # Route gateway input
         route_form_layout.addRow("Metric:", self.metric_input)
         routing_layout.addLayout(route_form_layout)
 
@@ -397,13 +413,13 @@ class NICViewer(QWidget):
         try:
             destination = self.destination_input.text()
             netmask = self.netmask_input.text()
-            gateway = self.gateway_input.text()
+            routegateway = self.route_gateway_input.text()  # Reference the renamed gateway input
             metric = self.metric_input.text()
 
-            if not destination or not netmask or not gateway:
+            if not destination or not netmask or not routegateway:
                 raise ValueError("Network Destination, Netmask, and Gateway are required.")
 
-            command = f'route add {destination} mask {netmask} {gateway} metric {metric}'
+            command = f'route add {destination} mask {netmask} {routegateway} metric {metric}'
             print(f"[DEBUG] Running command: {command}")  # DEBUG
             result = subprocess.run(command, capture_output=True, text=True, shell=True)
 
