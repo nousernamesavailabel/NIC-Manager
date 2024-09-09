@@ -3,11 +3,15 @@ import threading
 import sys
 import subprocess
 import math
-from PyQt5.QtCore import pyqtSlot, QMetaObject, Qt, Q_ARG  # Add this at the top of your file
+import os
+from PyQt5.QtCore import pyqtSlot, QMetaObject, Qt, Q_ARG # Add this at the top of your file
 from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QListWidget, QTextEdit, QLineEdit, QPushButton, \
-    QFormLayout, QMessageBox, QRadioButton, QButtonGroup, QHBoxLayout, QTabWidget, QTableWidget, QTableWidgetItem
+    QFormLayout, QMessageBox, QRadioButton, QButtonGroup, QHBoxLayout, QTabWidget, QTableWidget, QTableWidgetItem, \
+    QCheckBox
 from PyQt5.QtWidgets import QProgressBar
 from PyQt5.QtWidgets import QApplication
+from PyQt5.QtGui import QTextCursor
+
 
 # Automatically request elevated privileges
 elevate()
@@ -278,6 +282,11 @@ class NICViewer(QWidget):
         self.mtu_tab = QWidget()
         self.init_mtu_tab()
         self.tabs.addTab(self.mtu_tab, "MTU")
+
+        # Tab 4: Ping
+        self.ping_tab = QWidget()
+        self.init_ping_tab()
+        self.tabs.addTab(self.ping_tab, "Ping")
 
         self.setLayout(layout)
 
@@ -610,76 +619,110 @@ class NICViewer(QWidget):
         else:
             QMessageBox.warning(self, "Warning", "MTU test is already running.")
 
+    import math
+
     def run_mtu_test(self):
-        """Run MTU test starting with max MTU, down to min MTU, using binary search to find the optimal value."""
+        """Run MTU test with iterative halving based on max and min MTU values."""
         try:
-            max_mtu = int(self.max_mtu_input.text())
-            min_mtu = int(self.min_mtu_input.text())
+            # Get values from input fields
+            max_mtu_input = self.max_mtu_input.text()
+            min_mtu_input = self.min_mtu_input.text()
             remote_host = self.remote_host_input.text()
             timeout_input = self.timeout_input.text()
 
-            if not timeout_input:
-                timeout = 2000
+            # Check if max_mtu_input is empty and set default value if needed
+            if not max_mtu_input.strip():
+                max_mtu = 1500
             else:
-                timeout = int(self.timeout_input.text())
+                max_mtu = int(max_mtu_input)
+
+            # Check if min_mtu_input is empty and set default value if needed
+            if not min_mtu_input.strip():
+                min_mtu = 1100
+            else:
+                min_mtu = int(min_mtu_input)
+
+            # Check if remote_host is empty and set default value if needed
+            if not remote_host.strip():
+                remote_host = "8.8.8.8"
+
+            # Check if timeout_input is empty and set default value if needed
+            if not timeout_input.strip():
+                timeout = 2000  # Default timeout in milliseconds
+            else:
+                timeout = int(timeout_input)
 
             if max_mtu <= min_mtu:
                 raise ValueError("Maximum MTU should be greater than Minimum MTU.")
 
-            current_mtu = max_mtu
-
-            # Total steps for binary search: log2(max_mtu - min_mtu)
+            # Calculate total steps for binary search
             total_steps = math.ceil(math.log2(max_mtu - min_mtu))
             current_step = 0
 
-            # First ping with max_mtu
-            self.test_ping_mtu(current_mtu, remote_host, timeout)
-            ping_result = send_ping_with_mtu(current_mtu, remote_host, timeout)
+            # Step 1: Test the max MTU
+            self.update_debug_output(f"[DEBUG] Starting with max MTU: {max_mtu}")
+            self.test_ping_mtu(max_mtu, remote_host, timeout)
+            ping_result = send_ping_with_mtu(max_mtu, remote_host, timeout)
 
             if ping_result == "success":
-                self.update_debug_output(f"[DEBUG] Ping successful with max MTU: {current_mtu}")
+                self.update_debug_output(f"[DEBUG] Ping successful with max MTU: {max_mtu}")
                 self.update_progress_bar(100)
-                QApplication.processEvents()  # Ensure the update is processed
+                QApplication.processEvents()
                 return
             elif ping_result == "fragmentation":
-                self.update_debug_output(f"[DEBUG] Ping failed: MTU {current_mtu} is too large, needs to fragment.")
+                self.update_debug_output(f"[DEBUG] Max MTU {max_mtu} is too large, needs to fragment.")
             elif ping_result == "timeout":
-                self.update_debug_output(f"[DEBUG] Ping failed: Request timed out.")
+                self.update_debug_output(f"[DEBUG] Ping failed: Request timed out with max MTU {max_mtu}.")
+            else:
+                self.update_debug_output(f"[ERROR] Ping test failed for max MTU {max_mtu}.")
+                return
+
+            # Step 2: Test the min MTU
+            self.update_debug_output(f"[DEBUG] Testing min MTU: {min_mtu}")
+            self.test_ping_mtu(min_mtu, remote_host, timeout)
+            ping_result = send_ping_with_mtu(min_mtu, remote_host, timeout)
+
+            if ping_result != "success":
+                self.update_debug_output(f"[DEBUG] Min MTU {min_mtu} is too large. Exiting.")
                 self.update_progress_bar(100)
                 QApplication.processEvents()
                 return
             else:
-                self.update_debug_output(f"[ERROR] Failed to run ping test with MTU {current_mtu}.")
-                return
+                self.update_debug_output(f"[DEBUG] Min MTU {min_mtu} succeeded. Continuing with binary search.")
+                QApplication.processEvents()
 
-            # Continue binary search for optimal MTU
+            # Step 3: Binary search between max and min MTU
             while max_mtu - min_mtu > 1 and self.mtu_test_running:
-                current_mtu = (max_mtu + min_mtu) // 2
+                x = (max_mtu - min_mtu) // 2
+                current_mtu = min_mtu + x
+                self.update_debug_output(f"[DEBUG] Testing MTU: {current_mtu}")
                 self.test_ping_mtu(current_mtu, remote_host, timeout)
                 ping_result = send_ping_with_mtu(current_mtu, remote_host, timeout)
 
                 if ping_result == "success":
-                    self.update_debug_output(f"[DEBUG] Ping successful with MTU {current_mtu}.")
-                    min_mtu = current_mtu
+                    self.update_debug_output(f"[DEBUG] Ping successful with MTU {current_mtu}. Increasing MTU.")
+                    min_mtu = current_mtu  # Increase min_mtu to current_mtu
                 elif ping_result == "fragmentation":
-                    self.update_debug_output(f"[DEBUG] Ping failed with MTU {current_mtu}: needs to fragment.")
-                    max_mtu = current_mtu
+                    self.update_debug_output(f"[DEBUG] MTU {current_mtu} needs to fragment. Decreasing MTU.")
+                    max_mtu = current_mtu  # Decrease max_mtu to current_mtu
                 elif ping_result == "timeout":
                     self.update_debug_output(f"[DEBUG] Ping failed with MTU {current_mtu}: Request timed out.")
-                    max_mtu = current_mtu
+                    max_mtu = current_mtu  # Decrease max_mtu
                 else:
                     self.update_debug_output(f"[ERROR] Ping test failed for MTU {current_mtu}.")
 
+                # Increment step count and update progress bar
                 current_step += 1
                 progress_value = (current_step / total_steps) * 100
                 self.update_progress_bar(progress_value)
-                QApplication.processEvents()  # Process the events to update GUI elements
+                QApplication.processEvents()  # Ensure UI updates are processed
 
             # Final result
             if self.mtu_test_running:
                 self.update_debug_output(f"[DEBUG] Optimal MTU found: {min_mtu}")
                 self.update_progress_bar(100)
-                QApplication.processEvents()  # Ensure the update is processed
+                QApplication.processEvents()
+
         except Exception as e:
             self.update_debug_output(f"[ERROR] Failed to run MTU test: {str(e)}")
         finally:
@@ -841,6 +884,135 @@ class NICViewer(QWidget):
         except Exception as e:
             print(f"[ERROR] Failed to apply MTU: {e}")
             QMessageBox.critical(self, "Error", f"Failed to apply MTU: {str(e)}")
+
+    def init_ping_tab(self):
+        """Initialize the Ping tab components."""
+        ping_layout = QVBoxLayout()
+
+        label = QLabel('Ping Test:')
+        ping_layout.addWidget(label)
+
+        # Entry for ping remote host
+        self.ping_remote_host_input = QLineEdit(self)
+        self.ping_timeout_input = QLineEdit(self)
+        self.ping_size_input = QLineEdit(self)
+        self.ping_repeat_count_input = QLineEdit(self)
+
+        # Initialize checkboxes with labels
+        self.df_check = QCheckBox("DF", self)
+        self.dash_t = QCheckBox("Continuous", self)
+
+        ping_form_layout = QFormLayout()
+        ping_form_layout.addRow("Remote Host:", self.ping_remote_host_input)
+        ping_form_layout.addRow("Timeout (ms):", self.ping_timeout_input)
+        ping_form_layout.addRow("Size (B):", self.ping_size_input)
+        ping_form_layout.addRow("Repeat Count:", self.ping_repeat_count_input)
+
+        # Create a horizontal layout for the checkboxes
+        checkbox_layout = QHBoxLayout()
+        checkbox_layout.addWidget(self.df_check)
+        checkbox_layout.addWidget(self.dash_t)
+
+        # Add the checkbox layout to the form layout under one label
+        ping_form_layout.addRow("Options:", checkbox_layout)
+
+        # Debug output text area for showing ping results
+        self.ping_output = QTextEdit(self)
+        self.ping_output.setReadOnly(True)  # Ping output goes here
+        ping_layout.addWidget(self.ping_output)
+
+        # Add the form layout to the main ping layout
+        ping_layout.addLayout(ping_form_layout)
+
+        # Add a stretchable space to push the button to the bottom
+        ping_layout.addStretch()
+
+        # Add the Start Ping button at the bottom
+        self.start_ping_test_button = QPushButton("Start Ping", self)
+        ping_layout.addWidget(self.start_ping_test_button)
+        self.start_ping_test_button.clicked.connect(self.start_ping_test)
+
+        self.stop_ping_test_button = QPushButton("Stop Ping", self)
+        ping_layout.addWidget(self.stop_ping_test_button)
+        self.stop_ping_test_button.clicked.connect(self.stop_ping_test)
+
+        # Set the layout for the ping tab
+        self.ping_tab.setLayout(ping_layout)
+
+    def start_ping_test(self):
+        """Starts the ping test by gathering input values and running the ping command in a separate thread."""
+        if hasattr(self, 'ping_running') and self.ping_running:
+            QMessageBox.warning(self, "Ping in Progress", "A ping test is already running.")
+            return
+
+        # Gather input values from the form, or set defaults
+        remote_host = self.ping_remote_host_input.text().strip() or "8.8.8.8"
+        timeout = self.ping_timeout_input.text().strip() or "2000"
+        size = self.ping_size_input.text().strip() or "32"
+        repeat_count = self.ping_repeat_count_input.text().strip() or "4"
+        df_flag = self.df_check.isChecked()
+        continuous_flag = self.dash_t.isChecked()
+
+        # Build the ping command based on the inputs
+        ping_command = ["ping"]
+
+        # Add the host
+        ping_command.append(remote_host)
+
+        # Add packet size
+        ping_command.extend(["-l", size])
+
+        # Add timeout
+        ping_command.extend(["-w", timeout])
+
+        # Add repeat count (unless continuous mode is selected)
+        if not continuous_flag:
+            ping_command.extend(["-n", repeat_count])
+        else:
+            # If continuous mode is selected
+            ping_command.append("-t")
+
+        # Add the DF (Don't Fragment) flag if checked
+        if df_flag:
+            ping_command.append("-f")
+
+        # Start the ping process in a separate thread
+        self.ping_thread = threading.Thread(target=self.run_ping_process, args=(ping_command,))
+        self.ping_thread.start()
+        self.ping_running = True
+
+    def run_ping_process(self, ping_command):
+        """Run the ping command and output the results to the QTextEdit."""
+        try:
+            self.ping_output.append(f"[DEBUG] Running command: {' '.join(ping_command)}")
+            self.ping_process = subprocess.Popen(ping_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                                 text=True)
+
+            for line in self.ping_process.stdout:
+                if not self.ping_running:
+                    break  # Stop the ping if the stop button is pressed
+                self.ping_output.append(line.strip())  # Add output to the QTextEdit (ping_output)
+
+                # Automatically scroll to the bottom
+                self.ping_output.moveCursor(QTextCursor.End)
+                QApplication.processEvents()  # Ensure the GUI updates
+
+        except Exception as e:
+            self.ping_output.append(f"[ERROR] Ping test failed: {str(e)}")
+            self.ping_output.moveCursor(QTextCursor.End)  # Scroll to the bottom after error message
+
+        finally:
+            self.ping_running = False
+            self.ping_process = None
+
+    def stop_ping_test(self):
+        """Stops the running ping test."""
+        if hasattr(self, 'ping_process') and self.ping_process is not None:
+            self.ping_running = False
+            self.ping_process.terminate()  # Stop the ping process
+            self.ping_output.append("[DEBUG] Ping test stopped.")
+        else:
+            self.ping_output.append("[DEBUG] No ping test is currently running.")
 
 def main():
     """Main entry point for the application."""
